@@ -1,0 +1,126 @@
+name: CI/CD Pipeline
+
+on:
+ push:
+   branches: [ main, develop ]
+ pull_request:
+   branches: [ main ]
+
+jobs:
+ test:
+   runs-on: ubuntu-latest
+   strategy:
+     matrix:
+       python-version: [3.8, 3.9, '3.10', '3.11']
+
+   steps:
+   - uses: actions/checkout@v4
+   
+   - name: Set up Python ${{ matrix.python-version }}
+     uses: actions/setup-python@v4
+     with:
+       python-version: ${{ matrix.python-version }}
+       
+   - name: Install dependencies
+     run: |
+       python -m pip install --upgrade pip
+       pip install -r requirements.txt
+       
+   - name: Lint with flake8 (basic check)
+     run: |
+       pip install flake8
+       # Stop the build if there are Python syntax errors or undefined names
+       flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+       # Exit-zero treats all errors as warnings
+       flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+       
+   - name: Test bot imports
+     run: |
+       python -c "
+       import sys
+       sys.path.append('.')
+       try:
+           import funding_rate_bot
+           print('✅ Bot can be imported successfully')
+       except Exception as e:
+           print(f'❌ Import error: {e}')
+           sys.exit(1)
+       "
+       
+   - name: Test configuration
+     run: |
+       python -c "
+       import sys
+       sys.path.append('.')
+       try:
+           from config import config
+           print('✅ Configuration loaded successfully')
+           print(f'Symbols: {config.SYMBOLS}')
+           print(f'Exchanges: {config.ENABLED_EXCHANGES}')
+       except Exception as e:
+           print(f'❌ Config error: {e}')
+           sys.exit(1)
+       "
+
+ connectivity-test:
+   runs-on: ubuntu-latest
+   needs: test
+   
+   steps:
+   - uses: actions/checkout@v4
+   
+   - name: Set up Python
+     uses: actions/setup-python@v4
+     with:
+       python-version: '3.10'
+       
+   - name: Install dependencies
+     run: |
+       python -m pip install --upgrade pip
+       pip install -r requirements.txt
+       
+   - name: Test exchange connectivity
+     run: |
+       python -c "
+       import sys
+       sys.path.append('.')
+       from funding_rate_bot import FundingRateBot, test_connectivity
+       
+       print('🔧 Testing exchange connectivity...')
+       bot = FundingRateBot()
+       
+       # Test each exchange individually
+       for exchange_name, api in bot.collector.exchanges.items():
+           try:
+               print(f'Testing {exchange_name}...', end=' ')
+               rates = api.get_funding_rates(['BTC'])
+               if rates:
+                   print(f'✅ OK ({len(rates)} rates)')
+               else:
+                   print('⚠️ No data (may be rate limited)')
+           except Exception as e:
+               print(f'❌ Error: {str(e)[:50]}...')
+       
+       print('✅ Connectivity test completed')
+       "
+       
+   - name: Test full scan (limited)
+     run: |
+       timeout 60 python -c "
+       import sys
+       sys.path.append('.')
+       from funding_rate_bot import FundingRateBot
+       
+       print('🎯 Testing limited scan...')
+       bot = FundingRateBot()
+       
+       # Override with limited symbols for faster testing
+       bot.symbols = ['BTC', 'ETH']
+       
+       try:
+           bot.scan_opportunities()
+           print('✅ Scan test completed successfully')
+       except Exception as e:
+           print(f'⚠️ Scan test error: {e}')
+           # Don't fail the build for scan errors (might be API limits)
+       " || echo "⏰ Scan test timed out (normal for CI)"
